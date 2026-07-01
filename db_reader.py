@@ -18,15 +18,26 @@ _RANGES_CACHE = None
 
 
 def _load_ranges_json():
-    """measured_ranges.json 을 한 번만 읽어 메모리에 캐시."""
+    """measured_ranges.json 을 한 번만 읽어 메모리에 캐시.
+    개발/웹/맥앱(frozen) 어디서든 찾도록 여러 후보 경로를 탐색한다."""
     global _RANGES_CACHE
-    if _RANGES_CACHE is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measured_ranges.json")
+    if _RANGES_CACHE is not None:
+        return _RANGES_CACHE
+
+    candidates = [os.path.dirname(os.path.abspath(__file__))]
+    if getattr(sys, "_MEIPASS", None):
+        candidates.append(sys._MEIPASS)
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.dirname(sys.executable))
+    candidates.append(os.getcwd())
+
+    for base in candidates:
+        path = os.path.join(base, "measured_ranges.json")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 _RANGES_CACHE = json.load(f)
-        else:
-            _RANGES_CACHE = {}
+                return _RANGES_CACHE
+    _RANGES_CACHE = {}
     return _RANGES_CACHE
 
 
