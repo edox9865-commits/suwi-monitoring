@@ -3,22 +3,28 @@
 
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 AUTH_KEY = "8791AA48-CC32-4217-940F-BC80E7568A67"
 HRFCO_BASE = f"https://api.hrfco.go.kr/{AUTH_KEY}/waterlevel"
 WAMIS_BASE = "http://www.wamis.go.kr:8080/wamis/openapi/wkw"
+KST = timezone(timedelta(hours=9))
+
+
+def _now_kst() -> datetime:
+    """한국시간 기준 현재시각(naive). 앱은 한국 폰이라 KST, 웹 클라우드는 UTC이므로 통일한다."""
+    return datetime.now(KST).replace(tzinfo=None)
 
 
 def _fetch_hrfco(hrfco_code: str, hours: int) -> pd.DataFrame:
     """HRFCO Open API에서 시간단위 수위자료 조회."""
-    end = datetime.now()
+    end = _now_kst()
     start = end - timedelta(hours=hours)
     sy = start.strftime("%Y%m%d%H%M")
     ey = end.strftime("%Y%m%d%H%M")
 
     url = f"{HRFCO_BASE}/list/1H/{hrfco_code}/{sy}/{ey}.json"
-    resp = requests.get(url, timeout=15)
+    resp = requests.get(url, timeout=25)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -46,7 +52,7 @@ def _fetch_hrfco(hrfco_code: str, hours: int) -> pd.DataFrame:
 
 def _fetch_wamis(hrfco_code: str, hours: int) -> pd.DataFrame:
     """WAMIS Open API에서 시간단위 수위자료 조회 (HRFCO 실패 시 대체)."""
-    end = datetime.now()
+    end = _now_kst()
     start = end - timedelta(hours=hours)
 
     # WAMIS는 날짜 단위 조회, 시작~종료 날짜 커버
@@ -54,7 +60,7 @@ def _fetch_wamis(hrfco_code: str, hours: int) -> pd.DataFrame:
     enddt = end.strftime("%Y%m%d")
 
     url = f"{WAMIS_BASE}/wl_hrdata?obscd={hrfco_code}&startdt={startdt}&enddt={enddt}&output=json"
-    resp = requests.get(url, timeout=15)
+    resp = requests.get(url, timeout=25)
     resp.raise_for_status()
     payload = resp.json()
 

@@ -8,7 +8,7 @@ import json
 import os
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -20,14 +20,21 @@ from db_reader import get_measured_stage_range, get_file_mtime, get_base_dir
 from firestore_rest import get_all_stages, set_stages
 
 WAMIS_BASE = "http://www.wamis.go.kr:8080/wamis/openapi/wkw"
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    """한국시간(KST) 기준 현재시각(naive). 앱은 한국 폰이라 항상 KST를 쓰는데,
+    웹 클라우드는 UTC라 그대로 두면 조회 구간이 9시간 어긋난다."""
+    return datetime.now(KST).replace(tzinfo=None)
 
 
 def fetch_wamis(code: str, hours: int) -> pd.DataFrame:
     """WAMIS Open API에서 시간단위 수위자료 조회."""
-    end = datetime.now()
+    end = now_kst()
     start = end - timedelta(hours=hours)
     url = f"{WAMIS_BASE}/wl_hrdata?obscd={code}&startdt={start.strftime('%Y%m%d')}&enddt={end.strftime('%Y%m%d')}&output=json"
-    r = requests.get(url, timeout=15)
+    r = requests.get(url, timeout=25)
     r.raise_for_status()
     payload = r.json()
     if payload.get("result", {}).get("code") != "success":
@@ -131,33 +138,36 @@ st.markdown(
 )
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120)
 def load_waterlevel_bulk(codes: tuple, hours: int):
     """선택된 모든 지점의 수위자료를 동시에(병렬) 조회한다.
-    HRFCO 실패/0값이면 WAMIS로 자동 대체."""
+    HRFCO(https/443) 우선 → 실패/0값이면 WAMIS(8080)로 자동 대체.
+    반환: {code: (df, err_or_source)}  — 진단을 위해 실제 사용된 소스/오류를 함께 담는다."""
     results = {}
 
     def _fetch(code):
-        # 1단계: HRFCO(https/443) 우선 — 클라우드(해외 서버) 방화벽을 통과할 확률이 높다.
-        #        HRFCO가 비었거나 전부 0이면 내부적으로 WAMIS로 자동 대체된다.
+        errors = []
+        # 1단계: HRFCO(https/443) 우선 — 해외 클라우드 방화벽을 통과할 확률이 높다.
         try:
             df = fetch_hourly_waterlevel(code, hours)
             if not df.empty and not (df["wl"] == 0.0).all():
-                return code, df, None
-        except Exception:
-            pass
-        # 2단계: 최후 수단으로 WAMIS(포트 8080) 직접 시도 (로컬/국내망에서 유효)
+                return code, df, "HRFCO"
+            errors.append("HRFCO 빈자료/0값")
+        except Exception as e:
+            errors.append(f"HRFCO 오류: {type(e).__name__}")
+        # 2단계: 최후 수단으로 WAMIS(포트 8080) 직접 시도 (국내망에서 유효)
         try:
             wdf = fetch_wamis(code, hours)
             if not wdf.empty:
-                return code, wdf, None
-        except Exception:
-            pass
-        return code, pd.DataFrame(columns=["datetime", "wl"]), None
+                return code, wdf, "WAMIS"
+            errors.append("WAMIS 빈자료")
+        except Exception as e:
+            errors.append(f"WAMIS 오류: {type(e).__name__}")
+        return code, pd.DataFrame(columns=["datetime", "wl"]), " / ".join(errors)
 
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(codes)))) as ex:
-        for code, df, err in ex.map(_fetch, codes):
-            results[code] = (df, err)
+        for code, df, src in ex.map(_fetch, codes):
+            results[code] = (df, src)
     return results
 
 
@@ -272,6 +282,22 @@ codes_to_fetch = tuple(sorted({
 
 with st.spinner("수위 자료를 불러오는 중입니다..."):
     bulk_results = load_waterlevel_bulk(codes_to_fetch, hours) if codes_to_fetch else {}
+
+# ── 실시간 조회 진단 (클라우드에서 실제로 무엇을 겪는지 눈으로 확인) ──
+with st.expander("🩺 실시간 조회 진단 (문제 확인용)", expanded=False):
+    st.caption(f"서버 기준시각(KST): {now_kst():%Y-%m-%d %H:%M}  ·  조회기간 {hours}h")
+    code_to_name = {station_map[nm].get("hrfco_code"): nm for nm in selected}
+    diag_rows = []
+    for c in codes_to_fetch:
+        df_c, src_c = bulk_results.get(c, (pd.DataFrame(), "미조회"))
+        n = 0 if df_c is None or df_c.empty else len(df_c)
+        last_v = "-" if n == 0 else f"{df_c['wl'].iloc[-1]:.2f} m"
+        last_t = "-" if n == 0 else f"{df_c['datetime'].iloc[-1]:%m-%d %H:%M}"
+        diag_rows.append({
+            "지점": code_to_name.get(c, "?"), "코드": c,
+            "소스/상태": src_c, "건수": n, "최근값": last_v, "최근시각": last_t,
+        })
+    st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
 
 for name in selected:
     info = station_map[name]
