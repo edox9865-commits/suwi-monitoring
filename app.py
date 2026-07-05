@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from hrfco_api import fetch_hourly_waterlevel
+from hrfco_api import fetch_hourly_waterlevel, _fetch_hrfco
 from db_reader import get_measured_stage_range, get_file_mtime, get_base_dir
 from firestore_rest import get_all_stages, set_stages
 
@@ -146,26 +146,17 @@ def load_waterlevel_bulk(codes: tuple, hours: int):
     results = {}
 
     def _fetch(code):
-        errors = []
-        # 1단계: HRFCO(https/443) 우선 — 해외 클라우드 방화벽을 통과할 확률이 높다.
+        # 웹(해외 클라우드)에서는 HRFCO(https/443)만 사용한다.
+        # WAMIS(포트 8080)는 해외에서 연결이 막혀 타임아웃까지 매달리며 속도만 잡아먹는다.
         try:
-            df = fetch_hourly_waterlevel(code, hours)
-            if not df.empty and not (df["wl"] == 0.0).all():
+            df = _fetch_hrfco(code, hours)
+            if not df.empty:
                 return code, df, "HRFCO"
-            errors.append("HRFCO 빈자료/0값")
+            return code, df, "HRFCO 빈자료"
         except Exception as e:
-            errors.append(f"HRFCO 오류: {type(e).__name__}")
-        # 2단계: 최후 수단으로 WAMIS(포트 8080) 직접 시도 (국내망에서 유효)
-        try:
-            wdf = fetch_wamis(code, hours)
-            if not wdf.empty:
-                return code, wdf, "WAMIS"
-            errors.append("WAMIS 빈자료")
-        except Exception as e:
-            errors.append(f"WAMIS 오류: {type(e).__name__}")
-        return code, pd.DataFrame(columns=["datetime", "wl"]), " / ".join(errors)
+            return code, pd.DataFrame(columns=["datetime", "wl"]), f"HRFCO 오류: {type(e).__name__}"
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(codes)))) as ex:
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(codes)))) as ex:
         for code, df, src in ex.map(_fetch, codes):
             results[code] = (df, src)
     return results

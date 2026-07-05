@@ -24,7 +24,7 @@ def _fetch_hrfco(hrfco_code: str, hours: int) -> pd.DataFrame:
     ey = end.strftime("%Y%m%d%H%M")
 
     url = f"{HRFCO_BASE}/list/1H/{hrfco_code}/{sy}/{ey}.json"
-    resp = requests.get(url, timeout=25)
+    resp = requests.get(url, timeout=12)
     resp.raise_for_status()
     payload = resp.json()
 
