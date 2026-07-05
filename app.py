@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 
 from hrfco_api import fetch_hourly_waterlevel
 from db_reader import get_measured_stage_range, get_file_mtime, get_base_dir
+from firestore_rest import get_all_stages, set_stages
 
 WAMIS_BASE = "http://www.wamis.go.kr:8080/wamis/openapi/wkw"
 
@@ -170,7 +171,22 @@ def load_station_map():
         return json.load(f)
 
 
+@st.cache_data(ttl=60)
+def load_all_stages_fs():
+    """앱(Flutter)과 공유하는 Firestore의 측정수위 데이터를 읽는다."""
+    return get_all_stages()
+
+
+def build_measured(stages):
+    """측정수위 목록으로 h_min/h_max/오름차순 구조를 만든다."""
+    if not stages:
+        return None
+    s = sorted(float(x) for x in stages)
+    return {"h_min": s[0], "h_max": s[-1], "stages_asc": s, "n": len(s)}
+
+
 station_map = load_station_map()
+fs_stages = load_all_stages_fs()
 
 st.markdown(
     """
@@ -208,21 +224,39 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.markdown("### 📁 DB 자료 업데이트")
-    upload_name = st.selectbox("업데이트할 지점", all_names, key="upload_target")
-    uploaded_file = st.file_uploader(
-        f"{upload_name} 의 DB 엑셀(.xlsm/.xlsx) 업로드", type=["xlsm", "xlsx"], key="upload_file"
+    st.markdown("### ✏️ 측정수위 관리")
+    st.caption("여기서 추가·삭제한 값은 앱(Flutter)과 실시간으로 동기화됩니다.")
+    manage_name = st.selectbox("지점 선택", all_names, key="manage_target")
+    cur_stages = sorted(fs_stages.get(manage_name, []))
+
+    st.markdown(f"**현재 측정수위 {len(cur_stages)}개** (오름차순, m)")
+    if cur_stages:
+        for i, val in enumerate(cur_stages):
+            rc1, rc2 = st.columns([4, 1])
+            rc1.markdown(f"{i + 1}. **{val:.3f}** m")
+            if rc2.button("🗑", key=f"del_{manage_name}_{i}", help="삭제"):
+                new_list = cur_stages[:i] + cur_stages[i + 1:]
+                if set_stages(manage_name, new_list):
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("삭제 실패(네트워크). 다시 시도하세요.")
+    else:
+        st.caption("등록된 측정수위가 없습니다.")
+
+    add_val = st.number_input(
+        "측정수위 추가 (m)", min_value=0.0, max_value=100.0,
+        value=0.0, step=0.01, format="%.3f", key=f"add_{manage_name}",
     )
-    if uploaded_file is not None:
-        if st.button("✅ DB 변경 적용", use_container_width=True, type="primary"):
-            db_file_name = station_map[upload_name]["db_file"]
-            dest_path = os.path.join(DB_FOLDER_PATH, db_file_name)
-            with open(dest_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            st.cache_data.clear()
-            st.success(f"{upload_name} DB 자료가 갱신되었습니다.")
-            st.rerun()
-    st.caption("DB 엑셀 파일이 새로 갱신되면 자동으로 반영됩니다.")
+    if st.button("➕ 추가", use_container_width=True, type="primary"):
+        if add_val > 0:
+            if set_stages(manage_name, cur_stages + [add_val]):
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("추가 실패(네트워크). 다시 시도하세요.")
+        else:
+            st.warning("0보다 큰 값을 입력하세요.")
 
 if not selected:
     st.info("좌측에서 지점을 선택하세요.")
@@ -251,7 +285,11 @@ for name in selected:
         err = "국가관측망 코드 미확인 지점"
 
     measured = None
-    if db_file:
+    stages_fs = fs_stages.get(name)
+    if stages_fs:
+        measured = build_measured(stages_fs)
+    elif db_file:
+        # 폴백: Firestore에 자료가 없으면 기존 엑셀/번들 자료 사용
         mtime = get_file_mtime(db_file)
         measured = load_measured_range(db_file, mtime)
 
