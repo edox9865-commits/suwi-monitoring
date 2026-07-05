@@ -138,18 +138,19 @@ def load_waterlevel_bulk(codes: tuple, hours: int):
     results = {}
 
     def _fetch(code):
-        # 1단계: WAMIS 우선 사용 (14개 지점 모두 안정적으로 정확한 자료 제공)
-        try:
-            wdf = fetch_wamis(code, hours)
-            if not wdf.empty and not (wdf["wl"] == 0.0).all():
-                return code, wdf, None
-        except Exception:
-            pass
-        # 2단계: WAMIS 실패 시 HRFCO 백업
+        # 1단계: HRFCO(https/443) 우선 — 클라우드(해외 서버) 방화벽을 통과할 확률이 높다.
+        #        HRFCO가 비었거나 전부 0이면 내부적으로 WAMIS로 자동 대체된다.
         try:
             df = fetch_hourly_waterlevel(code, hours)
-            if not df.empty:
+            if not df.empty and not (df["wl"] == 0.0).all():
                 return code, df, None
+        except Exception:
+            pass
+        # 2단계: 최후 수단으로 WAMIS(포트 8080) 직접 시도 (로컬/국내망에서 유효)
+        try:
+            wdf = fetch_wamis(code, hours)
+            if not wdf.empty:
+                return code, wdf, None
         except Exception:
             pass
         return code, pd.DataFrame(columns=["datetime", "wl"]), None
@@ -398,9 +399,11 @@ for idx, name in enumerate(selected):
             annotation_font_color=AVG_COLOR,
         )
     else:
+        # row/col 지정 시 plotly가 해당 subplot 축으로 자동 매핑한다.
+        # (구버전처럼 "x1 domain"으로 직접 지정하면 최신 plotly에서 오류)
         fig.add_annotation(
             text="자료없음", row=row, col=col,
-            x=0.5, y=0.5, xref=f"x{idx+1} domain", yref=f"y{idx+1} domain",
+            x=0.5, y=0.5, xref="x domain", yref="y domain",
             showarrow=False, font=dict(size=14, color="#9ca3af"),
         )
 
