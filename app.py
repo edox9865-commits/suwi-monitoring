@@ -17,7 +17,7 @@ from plotly.subplots import make_subplots
 
 from hrfco_api import fetch_hourly_waterlevel, _fetch_hrfco
 from db_reader import get_measured_stage_range, get_file_mtime, get_base_dir
-from firestore_rest import get_all_stages, set_stages
+from firestore_rest import get_all_stages, set_stages, get_all_realtime
 
 WAMIS_BASE = "http://www.wamis.go.kr:8080/wamis/openapi/wkw"
 KST = timezone(timedelta(hours=9))
@@ -179,6 +179,23 @@ def load_all_stages_fs():
     return get_all_stages()
 
 
+@st.cache_data(ttl=120)
+def load_realtime_fs():
+    """실시간 수위를 Firestore에서 읽는다. (해외 클라우드는 HRFCO 직접호출 불가 →
+    한국망 수집기가 채워둔 Firestore 값을 읽는다.)
+    반환: {지점명: {"updated": str, "df": DataFrame[datetime, wl]}}"""
+    raw = get_all_realtime()
+    out = {}
+    for name, rt in raw.items():
+        pts = rt.get("points", [])
+        if pts:
+            df = pd.DataFrame(pts, columns=["datetime", "wl"]).sort_values("datetime").reset_index(drop=True)
+        else:
+            df = pd.DataFrame(columns=["datetime", "wl"])
+        out[name] = {"updated": rt.get("updated", ""), "df": df}
+    return out
+
+
 def build_measured(stages):
     """측정수위 목록으로 h_min/h_max/오름차순 구조를 만든다."""
     if not stages:
@@ -267,26 +284,34 @@ if not selected:
 summary_rows = []
 station_results = {}
 
-codes_to_fetch = tuple(sorted({
-    station_map[name]["hrfco_code"] for name in selected if station_map[name].get("hrfco_code")
-}))
+cutoff = now_kst() - timedelta(hours=hours)
 
 with st.spinner("수위 자료를 불러오는 중입니다..."):
-    bulk_results = load_waterlevel_bulk(codes_to_fetch, hours) if codes_to_fetch else {}
+    rt_data = load_realtime_fs()
 
-# ── 실시간 조회 진단 (클라우드에서 실제로 무엇을 겪는지 눈으로 확인) ──
-with st.expander("🩺 실시간 조회 진단 (문제 확인용)", expanded=False):
-    st.caption(f"서버 기준시각(KST): {now_kst():%Y-%m-%d %H:%M}  ·  조회기간 {hours}h")
-    code_to_name = {station_map[nm].get("hrfco_code"): nm for nm in selected}
+def _rt_df(name):
+    """지점의 실시간 df를 선택기간(hours)으로 잘라 반환."""
+    rec = rt_data.get(name)
+    if not rec or rec["df"].empty:
+        return pd.DataFrame(columns=["datetime", "wl"]), ""
+    df = rec["df"]
+    df = df[df["datetime"] >= cutoff].reset_index(drop=True)
+    return df, rec.get("updated", "")
+
+# ── 실시간 조회 진단 (Firestore 실시간 자료 상태 확인) ──
+last_upd = max((rt_data[n]["updated"] for n in rt_data if rt_data.get(n)), default="")
+with st.expander(f"🩺 실시간 자료 상태  ·  최근 수집 {last_upd or '없음'} KST", expanded=False):
+    st.caption("한국망 수집기가 HRFCO에서 받아 Firestore에 저장한 값을 읽습니다. "
+               "(해외 클라우드는 HRFCO 직접호출이 막혀 있어 이 방식으로 우회합니다.)")
     diag_rows = []
-    for c in codes_to_fetch:
-        df_c, src_c = bulk_results.get(c, (pd.DataFrame(), "미조회"))
-        n = 0 if df_c is None or df_c.empty else len(df_c)
+    for nm in selected:
+        df_c, upd = _rt_df(nm)
+        n = len(df_c)
         last_v = "-" if n == 0 else f"{df_c['wl'].iloc[-1]:.2f} m"
         last_t = "-" if n == 0 else f"{df_c['datetime'].iloc[-1]:%m-%d %H:%M}"
         diag_rows.append({
-            "지점": code_to_name.get(c, "?"), "코드": c,
-            "소스/상태": src_c, "건수": n, "최근값": last_v, "최근시각": last_t,
+            "지점": nm, "코드": station_map[nm].get("hrfco_code") or "-",
+            "수집시각": upd or "-", "건수": n, "최근값": last_v, "최근시각": last_t,
         })
     st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
 
@@ -295,12 +320,8 @@ for name in selected:
     code = info.get("hrfco_code")
     db_file = info.get("db_file")
 
-    wl_df = pd.DataFrame()
-    err = None
-    if code:
-        wl_df, err = bulk_results.get(code, (pd.DataFrame(), "조회 실패"))
-    else:
-        err = "국가관측망 코드 미확인 지점"
+    wl_df, _upd = _rt_df(name)
+    err = None if not wl_df.empty else "실시간 자료 없음(수집 대기)"
 
     measured = None
     stages_fs = fs_stages.get(name)
