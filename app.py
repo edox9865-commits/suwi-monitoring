@@ -457,6 +457,10 @@ for idx, name in enumerate(selected):
         wl_min, wl_max = wl_df["wl"].min(), wl_df["wl"].max()
         pad = max((wl_max - wl_min) * 0.6, 0.05)
         fig.update_yaxes(range=[wl_min - pad, wl_max + pad], row=row, col=col)
+        # x축을 자료의 실제 시간폭으로 고정. 측정수위대(초록음영) 상단이 화면 밖으로
+        # 크게 벗어나면 plotly가 x축을 과거로 잘못 늘리는 버그가 있어, 이를 막는다.
+        xvals = wl_df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
+        fig.update_xaxes(range=[xvals[0], xvals[-1]], row=row, col=col)
 
 fig.update_layout(
     height=420 * nrows, margin=dict(t=50, b=10),
