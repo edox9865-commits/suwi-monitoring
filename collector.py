@@ -14,7 +14,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
-from hrfco_api import _fetch_hrfco
+import pandas as pd
+
+from hrfco_api import _fetch_hrfco, _fetch_wamis
 from firestore_rest import set_realtime
 
 KST = timezone(timedelta(hours=9))
@@ -33,21 +35,34 @@ def main(hours: int = 24) -> int:
         code = info.get("hrfco_code")
         if not code:
             return name, "코드없음", 0
+        # 앱과 동일한 전략: WAMIS 우선(14지점 안정, 죽동교/보성교 등 HRFCO가 0으로 주는 지점 포함)
+        # → 실패/빈자료/전부 0이면 HRFCO 백업. 수집기는 한국망이라 WAMIS(8080) 접속 가능.
+        df = pd.DataFrame(columns=["datetime", "wl"])
+        src = ""
         try:
-            df = _fetch_hrfco(code, hours)
-        except Exception as e:
-            return name, f"HRFCO오류:{type(e).__name__}", 0
+            w = _fetch_wamis(code, hours)
+            if not w.empty and not (w["wl"] == 0.0).all():
+                df, src = w, "WAMIS"
+        except Exception:
+            pass
+        if df.empty:
+            try:
+                h = _fetch_hrfco(code, hours)
+                if not h.empty:
+                    df, src = h, "HRFCO"
+            except Exception as e:
+                return name, f"조회오류:{type(e).__name__}", 0
         if df.empty:
             return name, "빈자료", 0
         points = list(zip(df["datetime"], df["wl"]))
         ok = set_realtime(name, points, updated)
-        return name, ("저장" if ok else "저장실패"), len(points)
+        return name, (f"저장({src})" if ok else "저장실패"), len(points)
 
     items = list(station_map.items())
     ok_cnt = 0
     with ThreadPoolExecutor(max_workers=min(16, max(1, len(items)))) as ex:
         for name, status, n in ex.map(work, items):
-            if status == "저장":
+            if status.startswith("저장("):
                 ok_cnt += 1
             print(f"{name:8s} {status:12s} {n}건")
 
